@@ -9,7 +9,6 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/handler"
-	"github.com/hashicorp-demoapp/go-hckit"
 	"github.com/hashicorp-demoapp/product-api-go/client"
 	"github.com/hashicorp-demoapp/public-api/auth"
 	"github.com/hashicorp-demoapp/public-api/models"
@@ -18,6 +17,16 @@ import (
 	"github.com/hashicorp-demoapp/public-api/server"
 	"github.com/hashicorp/go-hclog"
 	"github.com/nicholasjackson/env"
+	"github.com/opentracing/opentracing-go"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
+	"go.opentelemetry.io/otel"
+	otlpgrpc "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+
+	otbridge "go.opentelemetry.io/otel/bridge/opentracing"
 
 	// "github.com/hashicorp-demoapp/public-api/service"
 	"github.com/gorilla/mux"
@@ -31,26 +40,29 @@ var metricsAddress = env.String("METRICS_ADDRESS", false, ":9102", "Metrics addr
 var productAddress = env.String("PRODUCT_API_URI", false, "http://localhost:9090", "Address for the product api")
 var paymentAddress = env.String("PAYMENT_API_URI", false, "http://localhost:18000", "Address for the payment api")
 
+const SERVICE_NAME = "public-api"
+
 func main() {
-	err := env.Parse()
+
+	ctx, closer, err := InitTracer()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Config.
-	// config := service.NewConfig()
+	defer closer()
 
 	logger = hclog.New(&hclog.LoggerOptions{
 		Name:  "public-api",
 		Level: hclog.Debug,
 	})
 
-	closer, err := hckit.InitGlobalTracer("public-api")
+	ctx, span := otel.Tracer("public-api").Start(ctx, "init")
+	err = env.Parse()
 	if err != nil {
-		logger.Error("Unable to initialize Tracer", "error", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-	defer closer.Close()
+
+	// Config.
+	// config := service.NewConfig()
 
 	// Authentication.
 	authn, err := authn.NewClient(authn.Config{
@@ -80,8 +92,8 @@ func main() {
 
 	// Server.
 	r := mux.NewRouter()
+	r.Use(otelmux.Middleware(SERVICE_NAME))
 	r.Use(auth.Middleware(authn))
-	r.Use(hckit.TracingMiddleware)
 
 	// create the client to the products-api
 	productsClient := client.NewHTTP(*productAddress)
@@ -116,9 +128,71 @@ func main() {
 
 	logger.Info("Starting server", "bind", *bindAddress, "metrics", *metricsAddress)
 
+	span.End()
 	err = http.ListenAndServe(*bindAddress, r)
 	if err != nil {
 		logger.Error("Unable to start server", "error", err)
 		os.Exit(1)
 	}
+}
+
+func InitTracer() (context.Context, func(), error) {
+	ctx := context.Background()
+
+	//otel.SetErrorHandler()
+
+	var exporter sdktrace.SpanExporter // allows overwrite in --test mode
+	var err error
+
+	exporter, err = otlpgrpc.New(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to configure OTLP/GRPC exporter: %s", err)
+	}
+
+	// set the service name that will show up in tracing UIs
+	resAttrs := resource.WithAttributes(semconv.ServiceNameKey.String(SERVICE_NAME))
+	res, err := resource.New(ctx, resAttrs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create OpenTelemetry service name resource: %s", err)
+	}
+
+	// SSP sends all completed spans to the exporter immediately and that is
+	// exactly what we want/need in this app
+	// https://github.com/open-telemetry/opentelemetry-go/blob/main/sdk/trace/simple_span_processor.go
+	ssp := sdktrace.NewBatchSpanProcessor(exporter)
+
+	// ParentBased/AlwaysSample Sampler is the default and that's fine for this
+	tracerProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithResource(res),
+		sdktrace.WithSpanProcessor(ssp),
+	)
+
+	// inject the tracer into the otel globals (and this starts the background stuff, I think)
+	otel.SetTracerProvider(tracerProvider)
+
+	// set up the W3C trace context as the global propagator
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	bridgeTracer, wrappedProvider := otbridge.NewTracerPair(otel.GetTracerProvider().Tracer(""))
+	//closer, err := hckit.InitGlobalTracer("public-api")
+	otel.SetTracerProvider(wrappedProvider)
+
+	bridgeTracer.SetWarningHandler(func(msg string) {
+		hclog.Default().Warn(msg)
+	})
+	opentracing.SetGlobalTracer(bridgeTracer)
+
+	// callers need to defer this to make sure all the data gets flushed out
+	return ctx, func() {
+		//closer.Close()
+		err = tracerProvider.Shutdown(ctx)
+		if err != nil {
+			hclog.Default().Error("shutdown of OpenTelemetry tracerProvider failed: %s", err)
+		}
+
+		err = exporter.Shutdown(ctx)
+		if err != nil {
+			hclog.Default().Error("shutdown of OpenTelemetry OTLP exporter failed: %s", err)
+		}
+	}, nil
 }

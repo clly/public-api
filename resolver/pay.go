@@ -10,7 +10,7 @@ import (
 func (r *MutationResolver) Pay(ctx context.Context, details *models.PaymentDetails) (*models.PaymentResponse, error) {
 	r.Log.Info("Received Pay Mutation", "details", details)
 
-	ok, err := r.PaymentService.Pay(details)
+	ok, err := r.PaymentService.Pay(ctx, details)
 	if err != nil {
 		r.Log.Error("Unable to make payment", "error", err)
 	}

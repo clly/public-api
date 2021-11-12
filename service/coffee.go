@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+
 	"github.com/hashicorp-demoapp/product-api-go/client"
 	"github.com/hashicorp-demoapp/public-api/models"
 )
@@ -16,8 +18,8 @@ func NewCoffeeService(c *client.HTTP) *CoffeeService {
 }
 
 // FindCoffees returns a list of coffees.
-func (s *CoffeeService) FindCoffees() ([]*models.Coffee, error) {
-	cofs, err := s.c.GetCoffees()
+func (s *CoffeeService) FindCoffees(ctx context.Context) ([]*models.Coffee, error) {
+	cofs, err := s.c.GetCoffees(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -15,7 +15,7 @@ FROM base as image-arm64
 COPY ./bin/arm64/public-api /app/public-api
 RUN chmod +x /app/public-api
 
-FROM image-${TARGETARCH}
+FROM image-amd64
 
 RUN echo "Running on $BUILDPLATFORM platform, building for $TARGETPLATFORM"
 

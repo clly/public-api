@@ -1,13 +1,14 @@
 package payments
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 
-	hckit "github.com/hashicorp-demoapp/go-hckit"
 	"github.com/hashicorp-demoapp/public-api/models"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // HTTPClient is a concrete implmentation of an HTTP client which can communicate with the payments service
@@ -17,21 +18,22 @@ type HTTPClient struct {
 }
 
 func NewHTTP(baseURL string) *HTTPClient {
-	c := &http.Client{Transport: hckit.TracingRoundTripper{Proxied: http.DefaultTransport}}
+
+	c := &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
 	return &HTTPClient{c, baseURL}
 }
 
 // MakePayment calls the payments api
-func (h *HTTPClient) MakePayment(details *models.PaymentDetails) (*models.PaymentResponse, error) {
+func (h *HTTPClient) MakePayment(ctx context.Context, details *models.PaymentDetails) (*models.PaymentResponse, error) {
 	pr := &PaymentRequest{}
 	pr.FromModel(details)
 
-	resp, err := h.client.Post(
-		h.baseURL,
-		"application/json",
-		pr,
-	)
-
+	req, err := http.NewRequestWithContext(ctx, "POST", h.baseURL, pr)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
